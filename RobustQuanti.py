@@ -7,19 +7,14 @@ import torch
 import torch.nn as nn
 import copy
 from utils.quantize_model import *
-import os
 import time
 import torchvision
-import random
-
-os.environ["CUDA_VISIBLE_DEVICES"] = "5"
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def load_dataset_model(data, model):
     if data == 'Imagenet':
         pthfile = r'/model/badnets/square_white_tar0_alpha0.00_mark(6,6).pth'
-        model = AlexNet().to(device)
+        model = AlexNet()
 
         transform_dataset = transforms.Compose([
             transforms.Resize((224, 224)),
@@ -60,24 +55,9 @@ def test(model, test_loader):
     print(correct1, total1)
     return (100. * correct1 / total1).item()
 
-def get_layer_output(Model, input, layer):
-    n = 0
-    for i, m in enumerate(Model.modules()):
-        if isinstance(m, nn.Conv2d) or isinstance(m, nn.BatchNorm2d) or \
-                isinstance(m, nn.ReLU) or isinstance(m, nn.MaxPool2d) or isinstance(m, nn.AdaptiveAvgPool2d):
-            n = n + 1
-            input = m(input)
-            if n == layer:
-                break;
-        elif isinstance(m, nn.Linear):
-            n = n + 1
-            input = torch.flatten(input, 1)
-            input = m(input)
-            if n == layer:
-                break;
-    return input
 
-def get_neural(result, figure):
+
+def get_neural(result, Th_low):
     c = []
     for i in result:
         if i not in c:
@@ -99,31 +79,50 @@ def get_neural(result, figure):
                 b[i] = b[j]
                 b[j] = temp
     res = []
-    for i in range(figure):
+    for i in range(Th_low):
         res.append(b[i][0])
 
     return res
 
-def select_neuron(layer, model, data_loader, num, figure):
+
+def select_neuron(model, data_loader, Th_high, Th_low):
     tj = []
-    tj1 = []
     for data in data_loader:
         images, labels = data
         images, labels = images.to(device), labels.to(device)
         for i in range(images.shape[0]):
-            out = get_layer_output(model, images[i:i+1], layer)
-            _, index = torch.topk(out[0], num, dim=0, largest=True, sorted=True)
-            for i in range(num):
-                tj.append(index[i].item())
-                tj1.append(out[0][index[i].item()])
-    neuron_list = get_neural(tj, figure)
+
+            features = []
+
+            def hook(module, inputdata, output):
+                # print(output.data.shape)
+                features.append(output.data)
+
+            #            handle = model.features.layer4[1].conv2.register_forward_hook(hook)#输入目标层的输出  gtsrb
+            handle = model.features.layer4[2].conv2.register_forward_hook(hook)  # 输入目标层的输出 vggface2
+            #            handle = model.features.layer4[1].conv2.register_forward_hook(hook)  # 输入目标层的输出 imagenet
+            model(images[i:i + 1])
+            handle.remove()
+            #            _, index = torch.topk(features[0], num, dim=1, largest=True, sorted=True)   #gtsrb
+            _, index = torch.topk(features[0][0].mean(dim=-1).mean(dim=-1), Th_high, dim=0, largest=True,
+                                  sorted=True)  # vggface2
+            #            _, index = torch.topk(features[0], num, dim=0, largest=True, sorted=True)
+            #            index = torch.stack(index)
+            print(type(index))
+            print(index.shape)
+            print(index[0])
+            print(index[0].shape)
+
+            for i in range(T1):
+                tj.append(index[0][i].item())
+    neuron_list = get_neural(tj, Th_low)
     return neuron_list
 
 
 def RobustQuanti(model, data, bit, Th_high, Th_low):
     if data == 'Imagenet':
 
-        neuron_list = select_neuron(15, model, testloader0, Th_high, Th_low)
+        neuron_list = select_neuron(15, model, testloader, Th_high, Th_low)
         index = []
         for i in range(4096):
             if i not in neuron_list:
@@ -139,8 +138,5 @@ def RobustQuanti(model, data, bit, Th_high, Th_low):
     return model
 
 testloader, poisonloader, model = load_dataset_model('Imagenet', 'resnet18')
-
-test(model, poisonloader)
-test(model, testloader)
 
 model = RobustQuanti(model, 'Imagenet', 8, Th_high, Th_low)
